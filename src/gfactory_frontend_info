@@ -1,0 +1,120 @@
+#!/usr/bin/python
+
+# This script aims to locate contact information (name, factory identity, collector, and web URL)
+# of all frontends in a factory.
+
+import os
+import sys
+import socket
+import optparse
+
+DEFAULT_CONFIG = "/usr/share/kestrel/kestrel_config_global"
+if os.path.exists(DEFAULT_CONFIG):
+    os.environ['CONDOR_CONFIG'] = DEFAULT_CONFIG
+if 'KESTREL_CONFIG' in os.environ:
+    os.envrion['CONDOR_CONFIG'] = os.environ['KESTREL_CONFIG']
+
+import classad
+import htcondor
+
+def getCollector(child_collectors):
+  if not child_collectors:
+    return "unknown"
+  if not hasattr(htcondor, 'RemoteParam'):
+    return "unsupported"
+
+  child_collectors = child_collectors.split(";")[0]
+  if child_collectors.find(":") != -1:
+    child_collector = child_collectors.rsplit("-", 1)[0]
+  else:
+    child_collector = child_collectors
+  info = child_collector.split(":")
+  if len(info) == 1:
+    info.append(9618)
+  info[1] = int(info[1])
+  ip = None
+  for addr in socket.getaddrinfo(*info):
+    if not htcondor.param.get('ENABLE_IPV6', False) and addr[0] == socket.AF_INET6:
+      continue
+    if not htcondor.param.get('ENABLE_IPV4', True) and addr[0] == socket.AF_INET6:
+      continue
+    ip = addr[4][0]
+    if addr[0] == socket.AF_INET6:
+      ip = "[%s]" % ip
+    break
+  if not ip:
+    raise Exception("Unable to determine IP address for %s." % info[0])
+  sinful = '<%s:%s>' % (ip, info[1])
+  rparam = htcondor.RemoteParam({'MyAddress': sinful, 'MyType': 'Collector'})
+  try:
+    coll = rparam["COLLECTOR_HOST"]
+  except RuntimeError:
+    coll = info[0]
+  except KeyError:
+    coll = info[0]
+
+  coll_vers = getCollectorVersion(coll)
+
+  return coll, coll_vers
+
+def getCollectorVersion(coll_name):
+  coll_name = coll_name.split(",")[0]
+  coll = htcondor.Collector(coll_name)
+  try:
+    coll_ads = coll.query(htcondor.AdTypes.Negotiator, "true", ["CondorVersion"])
+  except:
+    coll_ads = []
+  if coll_ads:
+    coll_vers = coll_ads[0].get("CondorVersion", "unset")
+  else:
+    coll_vers = "unknown"
+  return coll_vers
+
+parser = optparse.OptionParser()
+parser.add_option("-p", "--pool", dest="pool", help="Glidein factory to query.")
+parser.add_option("-c", "--const", dest="const", help="Constraint for querying frontends.")
+
+opts, args = parser.parse_args()
+
+if opts.pool:
+  coll = htcondor.Collector(opts.pool)
+  print "Querying factory collector", opts.pool
+else:
+  coll = htcondor.Collector()
+  print "Querying factory collector", htcondor.param['COLLECTOR_HOST']
+
+expr = classad.ExprTree('MyType=?="glideclient"')
+if opts.const:
+  expr.and_(opts.const)
+if args:
+  expr.and_(classad.ExprTree('regexp(%s, FrontendName' % classad.quote(args[0])))
+ads = coll.query(htcondor.AdTypes.Any, str(expr), ['AuthenticatedIdentity', 'FrontendName', 'GlideinParamGLIDEIN_Collector', 'GlideinWMSVersion', 'WebMonitoringURL'])
+
+frontends = {}
+print "Querying user collectors",
+for ad in ads:
+  if ad['FrontendName'] in frontends:
+    continue
+  sys.stdout.write(".")
+  sys.stdout.flush()
+  info = frontends.setdefault(ad['FrontendName'], {})
+  info['FrontendName'] = ad['FrontendName']
+  info['Identity'] = ad.get('AuthenticatedIdentity', 'unknown').split("@")[0]
+  info['Collector'], info['CollectorVersion'] = getCollector(ad.get("GlideinParamGLIDEIN_Collector", None))
+  info['WebUrl'] = ad.get('WebMonitoringURL', "unknown")
+sys.stdout.write("\n")
+
+if not frontends:
+  print "No frontends found!"
+else:
+  FORMAT = "%-45s %-45s %-12s %-11s %s"
+  print
+  print FORMAT % ("Frontend", "Collector", "Identity", "CondorVers", "URL")
+  print
+  for info in frontends.values():
+    vers_info = info['CollectorVersion'].split()
+    if len(vers_info) > 1:
+      vers = vers_info[1]
+    else:
+      vers = info['CollectorVersion']
+    print FORMAT % (info['FrontendName'], info['Collector'], info['Identity'].split("@")[0], vers, info['WebUrl'])

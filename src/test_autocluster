@@ -1,0 +1,210 @@
+#!/usr/bin/python
+
+import re
+import math
+import optparse
+
+import classad
+import htcondor
+
+def parseOpts():
+  parser = optparse.OptionParser()
+  parser.add_option("-a", "--attributes", dest="attributes")
+  parser.add_option("-p", "--pool", dest="pool")
+  parser.add_option("-n", "--name", dest="name")
+  parser.add_option("-s", "--schedd-const", dest="schedd_const")
+  parser.add_option("-c", "--const", dest="constraint", default="true")
+  parser.add_option("-m", "--match", dest="match", default="true")
+  parser.add_option("-g", "--glidein-pool", dest="gpool")
+  parser.add_option("--glidein-const", dest="gconstraint")
+
+  opts, args = parser.parse_args()
+  return opts
+
+def getGlideins(opts, attrs):
+  if opts.gpool:
+    coll = htcondor.Collector(opts.gpool)
+  else:
+    coll = htcondor.Collector()
+  gconst = classad.Attribute("MyType") == "glidefactory"
+  if opts.gconstraint:
+    gconst = gconst.and_(opts.gconstraint)
+  print "Querying for glideins matching:", gconst, "with attributes %s" % ", ".join(attrs)
+  glideins = coll.query(htcondor.AdTypes.Any, str(gconst), list(attrs))
+  print "%d glideins returned" % len(glideins)
+  return glideins
+
+def matchGlidein(glidein, ads, matchExpr):
+  matchAd = classad.ClassAd({"Requirements": matchExpr})
+  matchAd["glidein"] = dict(glidein)
+  glidein.setdefault("Matches", [])
+  glidein.setdefault("JobCount", 0)
+  glidein.setdefault("CoreCount", 0)
+  matches = []
+  for ad in ads:
+    matchAd["job"] = dict(ad)
+    #print matchAd
+    #print matchAd.eval("Requirements")
+    #break
+    result = matchAd.eval("Requirements")
+    if (type(result) != type(classad.Value.Error)) and result:
+      matches.append(ad["MyAutoClusterId"])
+      glidein["JobCount"] += ad["AdCount"]
+      glidein["CoreCount"] += ad["CoreCount"]
+      glideinList = [glidein["Name"]]
+      if "Glideins" in ad:
+        glideinList += list(ad["Glideins"])
+      ad["Glideins"] = glideinList
+      glideinSet = set([glidein["GLIDEIN_CMSSite"]])
+      if "GlideinSite" in ad:
+        glideinSet.update(ad["GlideinSite"])
+      ad["GlideinSite"] = glideinSet
+  glidein["Matches"] = matches
+  #print glidein
+
+def getSchedds(opts):
+  if opts.pool:
+    coll = htcondor.Collector(opts.pool)
+  else:
+    coll = htcondor.Collector()
+
+  if opts.name and opts.schedd_const:
+    raise Exception("Cannot specify both schedd --name and --schedd-const")
+
+  if opts.name:
+    schedd_ad = coll.locate(htcondor.DaemonTypes.Schedd, opts.name)
+    schedd = [htcondor.Schedd(schedd_ad)]
+  elif opts.schedd_const:
+    schedd_ads = coll.query(htcondor.AdTypes.Schedd, opts.schedd_const)
+    schedds = [htcondor.Schedd(schedd_ad) for schedd_ad in schedd_ads]
+  elif opts.pool:
+    schedd_ad = coll.locate(htcondor.DaemonTypes.Schedd)
+    schedds = [htcondor.Schedd(schedd_ad)]
+  else:
+    schedds = [htcondor.Schedd()]
+
+  return schedds
+
+def autoCluster(autoAds, newAd, autoattrs):
+  attrsToCheck = set(autoattrs)
+  for ad in autoAds:
+    attrsToCheck.update(ad.keys())
+  attrsToCheck.discard("ServerTime")
+  attrsToCheck.discard("AdCount")
+  attrsToCheck.discard("CoreCount")
+  attrsToCheck.discard("MyAutoClusterId")
+  foundAd = False
+  #print attrsToCheck, len(autoAds)
+  for ad in autoAds:
+    same = True
+    for attr in attrsToCheck:
+      if not ((attr in ad) == (attr in newAd)):
+        #print "Attribute presence not same: ", attr
+        same = False
+        break
+      elif (attr in ad) and not newAd.lookup(attr).sameAs(ad.lookup(attr)):
+        #print "Attribute not same", newAd.lookup(attr), ad.lookup(attr)
+        same = False
+        break
+    if same:
+      ad["AdCount"] += 1
+      newAd.setdefault("RequestCpus", 1)
+      ad["CoreCount"] += newAd["RequestCpus"]
+      foundAd = True
+      break
+  if not foundAd:
+    autoAds.append(newAd)
+    newAd.setdefault("AdCount", 1)
+    newAd.setdefault("RequestCpus", 1)
+    newAd.setdefault("CoreCount", newAd["RequestCpus"])
+    newAd["MyAutoClusterId"] = len(autoAds)
+
+def main():
+  opts = parseOpts()
+  schedds = getSchedds(opts)
+
+  if opts.attributes:
+    attrs = set(re.compile(",?\s*").split(opts.attributes))
+  else:
+    attrs = set()
+
+  matchExpr = classad.ExprTree(opts.match)
+  attrs.add("Requirements")
+  gattrs = set(attrs)
+  gattrs.add("Name")
+  gattrs.add("GLIDEIN_CPUS")
+  gattrs.add("GLIDEIN_Site")
+  for ref in classad.ClassAd().externalRefs(matchExpr):
+    info = ref.split(".")
+    if len(info) == 2:
+      if info[0] == "job":
+        attrs.add(info[1])
+      elif info[0] == "glidein":
+        gattrs.add(info[1])
+    else:
+        attrs.add(ref)
+        gattrs.add(ref)
+  attrs.add("JobStatus")
+  attrs.add("Owner")
+  attrs.add("RequestCpus")
+
+  glideins = getGlideins(opts, gattrs)
+  for glidein in glideins:
+    if "Requirements" in glidein:
+      for ref in glidein.externalRefs(glidein["Requirements"]):
+        info = ref.split(".")
+        if len(info) == 2 and info[0] in ["job", "target"]:
+          attrs.add(info[1])
+        else:
+          attrs.add(ref)
+
+  print "Auto-cluster attributes: %s" % ", ".join(attrs)
+
+  attrs = list(attrs)
+  autoAds = []
+  for schedd in schedds:
+    for ad in schedd.xquery(opts.constraint, attrs):
+      autoCluster(autoAds, ad, attrs)
+
+  print "Auto clusters:"
+  for ad in autoAds:
+    print ad
+
+  print "Glideins:"
+  autoAdDict = {}
+  for ad in autoAds:
+    autoAdDict[ad["MyAutoClusterId"]] = ad
+
+  glideinDict = {}
+  for glidein in glideins:
+    matchGlidein(glidein, autoAds, matchExpr)
+    if list(glidein["Matches"]):
+      glideinDict[glidein["Name"]] = glidein
+      glidein["UniqueAdCount"] = 0
+      glidein["ProportionalAdCount"] = 0
+      glidein["WeightedProportionalCoreCount"] = 0
+
+  for ad in autoAds:
+    if "Glideins" not in ad:
+      continue
+    adGlideins = list(ad["Glideins"])
+    adGlideinSite = list(ad["GlideinSite"])
+    #print adGlideinSite, adGlideins
+    if len(adGlideinSite) == 1:
+      for glidein in adGlideins:
+        glideinDict[glidein]["UniqueAdCount"] += ad["AdCount"]
+    weightedCpus = sum(int(glideinDict[gname].get("GLIDEIN_CPUS", 1)) for gname in adGlideins)
+    for gname in ad["Glideins"]:
+      glidein = glideinDict[gname]
+      glidein["ProportionalAdCount"] += ad["AdCount"] / float(len(adGlideins))
+      glidein["WeightedProportionalCoreCount"] += (ad["CoreCount"] * int(glidein.get("GLIDEIN_CPUS", 1))) / float(weightedCpus)
+
+  for glidein in glideinDict.values():
+    del glidein["Matches"]
+    glidein["ProportionalAdCount"] = int(math.ceil(glidein["ProportionalAdCount"]))
+    glidein["WeightedProportionalCoreCount"] = int(math.ceil(glidein["WeightedProportionalCoreCount"]))
+    print glidein
+
+if __name__ == "__main__":
+  main()
+

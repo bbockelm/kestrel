@@ -1,0 +1,12 @@
+#!/bin/sh
+
+if [ -a /usr/share/kestrel/kestrel_config_global ]; then
+  export CONDOR_CONFIG=/usr/share/kestrel/kestrel_config_global
+fi
+
+if [ "X$KESTREL_CONFIG" != "X" ]; then
+  export CONDOR_CONFIG=$KESTREL_CONFIG
+fi
+
+exec condor_config_val "$@"
+

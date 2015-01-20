@@ -1,0 +1,7 @@
+include src/test_autocluster
+include config/kestrel.spec
+include config/kestrel_config
+include config/kestrel_config_global
+include config/*.conf
+include src/*.cpf
+include MANIFEST.in

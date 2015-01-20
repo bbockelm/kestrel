@@ -1,0 +1,14 @@
+
+# list_frontends.cpf
+# Query a collector for the entry requests for a given frontend
+SELECT
+   FrontendName AS Name WIDTH AUTO
+   GroupName AS Group WIDTH -15
+   splitslotname(ReqGlidein)[0] AS Entry WIDTH -45
+   ReqIdleGlideins AS PilotsIdle PRINTF "%9d"
+   ReqMaxGlideins AS PilotsMax PRINTF "%9d"
+   ifThenElse(GlideinParamCONDOR_VERSION is null, "default", GlideinParamCONDOR_VERSION) AS PilotVersion WIDTH 11
+WHERE MyType=?="glideclient"
+GROUP BY FrontendName
+SUMMARY NONE
+

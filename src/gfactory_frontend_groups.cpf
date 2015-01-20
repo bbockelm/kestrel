@@ -1,0 +1,11 @@
+
+# list_frontends.cpf
+# Query a collector for global ads from the frontends.
+SELECT
+   FrontendName AS Name WIDTH -45
+   GroupName AS Group WIDTH -20
+   GlideinWMSVersion AS Version WIDTH -8
+WHERE MyType=?="glideclientglobal"
+GROUP BY FrontendName
+SUMMARY NONE
+

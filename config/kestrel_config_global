@@ -1,0 +1,6 @@
+
+LOCAL_CONFIG_FILE=/etc/kestrel/kestrel_config
+LOCAL_CONFIG_DIR=/usr/share/kestrel/config.d,/etc/kestrel/config.d
+KESTREL_SHARE=/usr/share/kestrel
+USER_CONFIG_FILE=kestrel_config
+

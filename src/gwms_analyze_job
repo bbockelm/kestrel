@@ -1,0 +1,253 @@
+#!/usr/bin/python
+
+import os
+import sys
+import optparse
+
+
+DEFAULT_CONFIG = "/usr/share/kestrel/kestrel_config_global"
+if os.path.exists(DEFAULT_CONFIG):
+    os.environ['CONDOR_CONFIG'] = DEFAULT_CONFIG
+if 'KESTREL_CONFIG' in os.environ:
+    os.envrion['CONDOR_CONFIG'] = os.environ['KESTREL_CONFIG']
+
+
+import classad
+import htcondor
+
+
+class CasePreservingInsensitiveDict(dict):
+
+    def __init__(self, data=None, **kwargs):
+        self._data = {}
+        if data:
+            self.update(data, **kwargs)
+        else:
+            self.update(**kwargs)
+
+    def __delitem__(self, key):
+        del self._data[key.lower()]
+
+    def __setitem__(self, key, value):
+        self._data[key.lower()] = (key, value)
+
+    def __getitem__(self, key):
+        return self._data[key.lower()][1]
+
+    def __iter__(self):
+        return (i[0] for i in self._data.values())
+
+    def __len__(self):
+        return len(self._data)
+
+    def __eq__(self, other):
+        if len(other) != len(self):
+            return False
+        for key in self._data.keys():
+            if key not in other:
+                return False
+            if other[key] != self[key]:
+                return False
+        return True
+
+    def keys(self):
+        return list(self.__iter__())
+
+    def update(self, *args, **kwargs):
+        if args:
+            data = args[0]
+            if hasattr(data, 'keys'):
+                for key in data.keys():
+                    self[key] = data[key]
+            else:
+                for key, val in data:
+                    self[key] = val
+        for key, val in kwargs.items():
+            self[key] = val
+
+    def has_key(self, key):
+        return self._data.has_key(key.lower())
+
+    def items(self):
+        return [val for val in self._data.values()]
+
+    def __repr__(self):
+        return '%r' % dict(self.items())
+
+
+def get_opts():
+    parser = optparse.OptionParser()
+    parser.add_option("-p", "--pool", help="User collector hostname", dest="pool")
+    parser.add_option("-n", "--name", help="Schedd to query for job.", dest="name")
+    parser.add_option("-g", "--group", help="Group name regexp for frontend matching.", dest="group")
+    parser.add_option("-e", "--entries", help="Mechanism for grouping results (entry, site, or cms)", dest="entries")
+    parser.add_option("--unsafe", help="Enable UNSAFE operations.", action="store_true", default=False, dest="unsafe")
+
+    opts, args = parser.parse_args()
+    if len(args) != 1:
+        print >> sys.stderr, "Usage: %s [--pool <pool>] [--name <name>] JOB_ID" % sys.argv[0]
+        sys.exit(1)
+
+    if not opts.unsafe:
+        print >> sys.stderr, "Unsafe operations not explicitly allowed."
+        print >> sys.stderr, "In order to see if jobs match an entry, an ARBITRARY PYTHON EXPRESSION must be evaluated."
+        print >> sys.stderr, "This expression is controlled by the FRONTEND and may execute arbitrary code on this host."
+        print >> sys.stderr, "This is inherently unsafe; you should only allow this if you control the frontend."
+        sys.exit(1)
+
+    return opts, args[0]
+
+
+def main():
+    opts, jobid = get_opts()
+    if opts.pool:
+        coll = htcondor.Collector(opts.pool)
+    else:
+        coll = htcondor.Collector()
+    if opts.name:
+        schedd_ad = coll.locate(htcondor.DaemonTypes.Schedd, opts.name)
+    else:
+        schedd_ad = coll.locate(htcondor.DaemonTypes.Schedd)
+    schedd = htcondor.Schedd(schedd_ad)
+
+    info = jobid.split(".")
+    job_expr = classad.Attribute("ClusterId") == int(info[0])
+    if len(info) > 1:
+        proc_expr = classad.Attribute("ProcId") == int(info[1])
+        job_expr = job_expr.and_(proc_expr)
+        
+    ads = list(schedd.xquery(str(job_expr)))
+    if len(ads) != 1:
+        print >> sys.stderr, "Schedd %s in pool %s is unable to find job %s." % (opts.name, opts.pool, jobid)
+        sys.exit(1)
+    jobad = ads[0]
+
+    entries_expr = classad.ExprTree('MyType=?="glideresource"')
+    if opts.group:
+        group_expr = classad.ExprTree("regexp(%s, GlideGroupName)" % classad.quote(opts.group))
+        entries_expr.and_(group_expr)
+
+    # TODO: We should instead query all the factories, then match against the python
+    # exprs defined by the frontend.
+    entries = coll.query(htcondor.AdTypes.Any, str(entries_expr))
+    filtered_entries = []
+    excluded_match = []
+    excluded_entry_const = []
+    excluded_job_const = []
+    excluded_start_expr = []
+    for entry in entries:
+        scope_ad = classad.ClassAd()
+        scope_ad.update(jobad)
+        scope_ad.update(entry)
+        passes_entry_const = False
+        passes_job_const = False
+        passes_start_expr = False
+        passes_match = False
+        if 'GlideClientConstraintFactoryCondorExpr' in entry:
+            try:
+                if not entry.lookup("GlideClientConstraintFactoryCondorExpr").eval(scope_ad):
+                    excluded_start_expr.append(entry)
+                else:
+                    passes_start_expr = True
+            except:
+                print "Failed to evaluate GlideClientConstraintFactoryCondorExpr: %s" % str(scope_ad.lookup('GlideClientConstraintFactoryCondorExpr'))
+                continue
+        if 'GlideClientConstraintJobCondorExpr' in entry:
+            try:
+                if not entry.lookup("GlideClientConstraintJobCondorExpr").eval(scope_ad):
+                    excluded_job_const.append(entry)
+                else:
+                    passes_job_const = True
+            except:
+                print "Failed to evaluate GlideClientConstraintJobCondorExpr: %s" % str(scope_ad.lookup('GlideClientConstraintJobCondorExpr'))
+                continue
+        # In the VO-frontend, the value of GlideClientMatchingInternalPythonExpr and GlideClientMatchingGlideinCondorExpr are swapped.
+        if 'GlideClientMatchingInternalPythonExpr' in entry:
+            try:
+                if not entry.lookup("GlideClientMatchingInternalPythonExpr").eval(scope_ad):
+                    excluded_job_const.append(entry)
+                else:
+                    passes_entry_const = True
+            except:
+                print "Failed to evaluate GlideClientMatchingInternalPythonExpr: %s" % str(scope_ad.lookup("GlideClientMatchingInternalPythonExpr"))
+                continue
+        scope_vars = {"job": CasePreservingInsensitiveDict(jobad), "glidein": {"attrs": CasePreservingInsensitiveDict(entry)}}
+        if 'GlideClientMatchingGlideinCondorExpr' in entry:
+            try:
+                match_expr = entry["GlideClientMatchingGlideinCondorExpr"]
+                match_expr = """((job[\"JobStatus\"]==2) or (((not glidein[\"attrs\"].has_key(\"GLIDEIN_Max_Walltime\")) or (((not job.has_key(\"LastVacateTime\")) and ((not job.has_key(\"NormMaxWallTimeMins\")) or ((job[\"NormMaxWallTimeMins\"]+10)<((glidein[\"attrs\"][\"GLIDEIN_Max_Walltime\"]-glidein[\"attrs\"][\"GLIDEIN_Retire_Time_Spread\"])/60)))) or ((job.has_key(\"LastVacateTime\")) and ((not job.has_key(\"MaxWallTimeMins\")) or ((job[\"MaxWallTimeMins\"]+10)<((glidein[\"attrs\"][\"GLIDEIN_Max_Walltime\"]-glidein[\"attrs\"][\"GLIDEIN_Retire_Time_Spread\"])/60)))))) and ((not job.has_key(\"MemoryUsage\")) or (job[\"MemoryUsage\"]<=(glidein[\"attrs\"][\"GLIDEIN_MaxMemMBs\"]))) and (job[\"RequestMemory\"]<=glidein[\"attrs\"][\"GLIDEIN_MaxMemMBs\"])  and (((not job.has_key(\"NumJobStarts\")) or (job[\"NumJobStarts\"]<5)) or (job.has_key(\"LastVacateTime\") and ((job[\"ServerTime\"]-job[\"LastVacateTime\"])>3600))))) and \
+                    ((not glidein[\"attrs\"].has_key(\"GLIDEIN_Job_Min_Time\"))or(job.has_key(\"NormMaxWallTimeMins\")and((job[\"NormMaxWallTimeMins\"]*60)>glidein[\"attrs\"][\"GLIDEIN_Job_Min_Time\"]))) and \
+                    ((job.has_key(\"DESIRED_Sites\") and (glidein[\"attrs\"][\"GLIDEIN_CMSSite\"] in job[\"DESIRED_Sites\"].split(\",\"))) or (job.has_key(\"DESIRED_Gatekeepers\") and (glidein[\"attrs\"][\"GLIDEIN_Gatekeeper\"] in job[\"DESIRED_Gatekeepers\"].split(\",\"))) or (job.has_key(\"DESIRED_SEs\") and glidein[\"attrs\"].has_key(\"GLIDEIN_SEs\") and (len(set(glidein[\"attrs\"][\"GLIDEIN_SEs\"].split(\",\"))&set(job[\"DESIRED_SEs\"].split(\",\")))>0))) and \
+                    (((glidein[\"attrs\"].get(\"GLIDEIN_Is_HTPC\")==\"True\")==(job.get(\"DESIRES_HTPC\")==1))or(glidein[\"attrs\"][\"GLIDEIN_CMSSite\"]==\"T2_US_Purdue\"))"""
+                match_expr = """ ((job.has_key(\"DESIRED_Sites\") and (glidein[\"attrs\"][\"GLIDEIN_CMSSite\"] in job[\"DESIRED_Sites\"].split(\",\"))) or (job.has_key(\"DESIRED_Gatekeepers\") and (glidein[\"attrs\"][\"GLIDEIN_Gatekeeper\"] in job[\"DESIRED_Gatekeepers\"].split(\",\"))) or (job.has_key(\"DESIRED_SEs\") and glidein[\"attrs\"].has_key(\"GLIDEIN_SEs\") and (len(set(glidein[\"attrs\"][\"GLIDEIN_SEs\"].split(\",\"))&set(job[\"DESIRED_SEs\"].split(\",\")))>0))) """
+                if not eval(match_expr, {}, scope_vars):
+                    excluded_match.append(entry)
+                else:
+                    passes_match = True
+            except:
+                print "Failed to evaluate GlideClientMatchingGlideinCondorExpr: %s" % str(scope_ad.lookup("GlideClientMatchingGlideinCondorExpr"))
+                #print scope_vars['job']
+                #keys = scope_vars['job'].keys()
+                #keys.sort()
+                #print keys
+                #print scope_vars['glidein']
+                raise
+        if passes_match and passes_entry_const and passes_job_const and passes_start_expr:
+            filtered_entries.append(entry)
+
+    if not opts.entries:
+        if jobad.get("x509UserProxyFirstFQAN", "").startswith("/cms"):
+            opts.entries = 'cms'
+        else:
+            opts.entries = 'site'
+    if opts.entries == 'entry':
+        kind = 'entries'
+        kindkey = 'Name'
+    elif opts.entries == 'site':
+        kind = 'sites'
+        kindkey = 'GLIDEIN_ResourceName'
+    elif opts.entries == 'cms':
+        kind = 'CMS sites'
+        kindkey = 'GLIDEIN_CMSSite'
+    else:
+        print >> sys.stderr, "Unknown value for option --entries (%s).  Known values: cms, site, entry" % opts.entries
+
+    if filtered_entries:
+        _entries = set(["%s" % entry[kindkey] for entry in filtered_entries])
+        _entries = list(_entries)
+        _entries.sort()
+        print "Matching %s:\n%s" % (kind, "\n".join(["- %s" % i for i in _entries]))
+    else:
+        already_excluded = set()
+        if entries:
+            print "Job is excluded by all %s!" % kind
+        else:
+            print "No %s returned!" % kind
+        if excluded_entry_const:
+            _entries = set([entry[kindkey] for entry in excluded_entry_const])
+            _entries = list(_entries)
+            _entries.sort()
+            print "Excluded %s due to factory query constraint:\n%s" % (kind, "\n".join(["- %s" % i for i in _entries]))
+            already_excluded.update(_entries)
+        if excluded_job_const:
+            _entries = set([entry[kindkey] for entry in excluded_job_const if entry[kindkey] not in already_excluded])
+            _entries = list(_entries)
+            _entries.sort()
+            print "Excluded %s due to job query constraint:\n%s" % "\n".join(["- %s" % i for i in _entries])
+            already_excluded.update(_entries)
+        if excluded_match:
+            _entries = set([entry[kindkey] for entry in excluded_match if entry[kindkey] not in already_excluded])
+            _entries = list(_entries)
+            _entries.sort()
+            print "Excluded %s due to job/entry match constraint:\n%s" % "\n".join(["- %s" % i for i in _entries])
+            already_excluded.update(_entries)
+        if excluded_start_expr:
+            _entries = set([entry[kindkey] for entry in excluded_start_expr if entry[kindkey] not in already_excluded])
+            _entries = list(_entries)
+            _entries.sort()
+            print "Excluded %s due to entry START expression:\n%s" % "\n".join(["- %s" % i for i in _entries])
+
+
+if __name__ == '__main__':
+    main()
+
