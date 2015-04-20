@@ -1,0 +1,83 @@
+#!/usr/bin/python
+
+import os
+import sys
+import optparse
+
+
+DEFAULT_CONFIG = "/usr/share/kestrel/kestrel_config_global"
+if os.path.exists(DEFAULT_CONFIG):
+    os.environ['CONDOR_CONFIG'] = DEFAULT_CONFIG
+if 'KESTREL_CONFIG' in os.environ:
+    os.envrion['CONDOR_CONFIG'] = os.environ['KESTREL_CONFIG']
+
+
+import classad
+import htcondor
+
+
+def get_opts():
+    parser = optparse.OptionParser()
+    parser.add_option("-p", "--pool", help="User collector hostname", dest="pool")
+    parser.add_option("-g", "--group", help="Group name regexp for frontend matching.", dest="group")
+    parser.add_option("-c", "--const", help="Constraint for filtering entries.", dest="const")
+    parser.add_option("-e", "--entries", help="Mechanism for grouping results (entry, site, or cms)", dest="entries", default="site")
+
+    opts, args = parser.parse_args()
+
+    return opts
+
+
+def main():
+    opts = get_opts()
+    if opts.pool:
+        coll = htcondor.Collector(opts.pool)
+    else:
+        coll = htcondor.Collector()
+
+    if opts.entries == 'entry':
+        kind = 'entries'
+        kindkey = 'Name'
+    elif opts.entries == 'site':
+        kind = 'sites'
+        kindkey = 'GLIDEIN_ResourceName'
+    elif opts.entries == 'cms':
+        kind = 'CMS sites'
+        kindkey = 'GLIDEIN_CMSSite'
+    else:
+        print >> sys.stderr, "Unknown value for option --entries (%s).  Known values: cms, site, entry" % opts.entries
+
+    entries_expr = classad.ExprTree('MyType=?="glideresource"')
+    if opts.group:
+        group_expr = classad.ExprTree("regexp(%s, GlideGroupName)" % classad.quote(opts.group))
+        entries_expr.and_(group_expr)
+    if opts.const:
+        const_expr = classad.ExprTree(opts.const)
+        entries_expr.and_(const_expr)
+
+    entries = coll.query(htcondor.AdTypes.Any, str(entries_expr))
+
+    filtered_entries = {}
+    def add_info(new_key, old_key, entry_info, entry):
+        entry_info.setdefault(new_key, 0)
+        entry_info[new_key] += entry.get(old_key, 0)
+
+    for entry in entries:
+        if kindkey in entry:
+            entry_info = filtered_entries.setdefault(entry[kindkey], {})
+        else:
+            print "Skipping entry %s because it has no key %s." % (entry['Name'], kindkey)
+            continue
+        add_info('GlideinsRunning', 'GlideFactoryMonitorStatusRunning', entry_info, entry)
+        add_info('GlideinsRequestedIdle', 'GlideFactoryMonitorRequestedIdle', entry_info, entry)
+        add_info('GlideinsIdle', 'GlideFactoryMonitorStatusIdle', entry_info, entry)
+        add_info('Pressure', 'GlideClientMonitorJobsIdleMatching', entry_info, entry)
+        add_info('JobsRunning', 'GlideClientMonitorJobsRunningHere', entry_info, entry)
+
+    for name, entry_info in filtered_entries.items():
+        print name, entry_info
+
+
+if __name__ == '__main__':
+    main()
+
