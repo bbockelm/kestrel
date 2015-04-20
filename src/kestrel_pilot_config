@@ -1,0 +1,104 @@
+#!/usr/bin/python
+
+import sys
+import optparse
+
+import classad
+import htcondor
+
+def check_is_expr(name, value):
+    try:
+        classad.ExprTree(str(value))
+    except:
+        print >> sys.stderr, "Unable to parse option %s value %s into valid expression." % (name, value)
+        sys.exit(1)
+
+def parse_opts():
+    parser = optparse.OptionParser()
+    parser.add_option("-c", "--constraint", default='Name=?="red.unl.edu"', dest="const", help="Constraint for parsing schedds")
+    parser.add_option("-j", "--job-constraint", default='GlideinClient =?= "CMSG-v1_0.main"', dest="job_const", help="Job query constraint")
+    parser.add_option("-p", "--pool", default="collector1.opensciencegrid.org:9619", dest="pool", help="Collector to query for glideins")
+    parser.add_option("-i", "--integrity", default=False, action="store_true", dest="integrity")
+    parser.add_option("-d", "--debug", default=False, action="store_true", dest="debug")
+
+    opts, args = parser.parse_args()
+
+    check_is_expr('constraint', opts.const)
+    check_is_expr('job-constraint', opts.job_const)
+
+    # Sigh... until GOC upgrades
+    htcondor.param['ENABLE_IPV6'] = 'False'
+
+    if opts.debug:
+        if 'TOOL_DEBUG' in htcondor.param:
+            htcondor.param['TOOL_DEBUG'] = htcondor.param['TOOL_DEBUG'] + ',D_FULLDEBUG'
+        else:
+            htcondor.param['TOOL_DEBUG'] = 'D_FULLDEBUG'
+        htcondor.enable_debug()
+
+    return opts
+
+def main():
+    opts = parse_opts()
+
+    if opts.integrity:
+        htcondor.param['DENY_CLIENT'] = ''
+        htcondor.param['GSI_DAEMON_NAME'] = ''
+        htcondor.param['SEC_CLIENT_INTEGRITY'] = 'REQUIRED'
+
+    collector = htcondor.Collector(opts.pool)
+    if opts.debug:
+        print "Querying for schedds matching constraint %s." % opts.const
+    schedd_ads = collector.query(htcondor.AdTypes.Schedd, opts.const)
+    for schedd_ad in schedd_ads:
+        schedd = htcondor.Schedd(schedd_ad)
+        const = classad.ExprTree(opts.job_const).and_(classad.ExprTree('Cmd=?="glidein_startup.sh"'))
+        try:
+            jobs = list(schedd.xquery(requirements=opts.job_const, limit=1, projection=["Arguments"]))
+        except:
+            print >> sys.stderr, "Failed to query schedd %s." % schedd_ad['Machine']
+            continue
+        if not jobs or 'Arguments' not in jobs[0]:
+            continue
+        args = {}
+        cur_arg = None
+        for arg in jobs[0]['Arguments'].split():
+            if arg.startswith("-"):
+                cur_arg = arg[1:]
+            elif cur_arg:
+                args[cur_arg] = arg
+                cur_arg = None
+        #for key, val in args.items():
+        #    print key, ":", val
+        print '[Options]'
+        my_params = [ \
+            'clientdescript', \
+            'clientsign', \
+            'param_GLIDEIN_Collector', \
+            'sign', \
+            'param_CONDOR_VERSION', \
+            'web', \
+            'factory', \
+            'clientsigngroup', \
+            'clientdescriptgroup', \
+            'clientweb', \
+            'signtype', \
+            'submitcredid', \
+            'clientgroup', \
+            'clientsigntype', \
+            'schedd', \
+            'name', \
+            'clientwebgroup', \
+            'descript', \
+            'descriptentry', \
+            'param_GLIDEIN_Client', \
+            'signentry', \
+        ]
+        for key, val in args.items():
+            if key in my_params:
+                print '%s = %s' % (key, val)
+        break
+
+if __name__ == '__main__':
+    main()
+
