@@ -41,6 +41,30 @@ gwms_analyze_job -p collector.example.com -n schedd.example.com 1880275.0 --unsa
 
 *Note*: this script must run arbitrary python code controlled by the frontend.  Only use it if this is an acceptable situation.
 
+### gwms_compare_collectors
+
+Compare two collectors for HA setups.
+
+Given two VO collectors, this will compare the glideins registered to each.  Inconsistent
+HA collectors is an early sign of a pool that is scaling poorly.
+
+Sample output:
+```
+$ gwms_compare_collectors collector1.example.com collector2.example.com
+Summary:
+There are 89182 unique glideins in vocms097.cern.ch; 87905 are claimed and 1271 are unclaimed
+There are 95643 unique glideins in vocms099.cern.ch; 94404 are claimed and 1235 are unclaimed
+There are 95782 total unique glideins; 94470 are claimed and 1350 are unclaimed
+There are 89043 glideins in both; 87839 claimed and 1156 unclaimed
+```
+
+### kestrel_unzip_log
+
+The stderr of a glidein contains a compressed version of the master, startd, and starter
+log; use the tool to decompress and print the contents to stdout.
+
+This is useful for site admins who would like to look at the contents of logs on a CE.
+
 ## INSTALLATION
 
 To install Kestrel, run:

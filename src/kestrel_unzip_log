@@ -1,0 +1,144 @@
+#!/usr/bin/python
+
+"""
+Transform a logfile from glideinWMS - or stdin - to
+the corresponding HTCondor file
+"""
+
+import os
+import re
+import sys
+import gzip
+import binascii
+import optparse
+import StringIO
+
+# The following functions
+# - get_Compressed_raw
+# - get_Compressed
+# - get_CondorLog
+# Are taken from the glideinWMS source code; in particular,
+# this library:
+#
+# https://github.com/holzman/glideinWMS/blob/master/factory/tools/lib/gWftLogParser.py
+#
+# If you need to take this code, I recommend using the above version as
+# the one below may be out-of-date.
+#
+# This copying is a convenience until proper packaging is done.
+# These functions come with the following copyright notice and
+# license:
+
+# Copyright (c) 2009, FERMI NATIONAL ACCELERATOR LABORATORY 
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are
+# met:
+#
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#     * Redistributions in binary form must reproduce the above
+#       copyright notice, this list of conditions and the following
+#       disclaimer in the documentation and/or other materials provided
+#       with the distribution.
+#     * Neither the name of the FERMI NATIONAL ACCELERATOR LABORATORY,
+#       nor the names of its contributors may be used to endorse or
+#       promote products derived from this software without specific
+#       prior written permission.
+
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
+
+
+# extract the blob from a glidein log file starting from position 
+def get_Compressed_raw(log_fp, start_str, start_pos=0):
+    SL_START_RE=re.compile("%s\nbegin-base64 644 -\n"%start_str,re.M|re.DOTALL)
+
+    # first find the header that delimits the log in the file
+    result_buf = ''
+    found_start = False
+    prev_line = ''
+    prev_line2 = ''
+    for line in log_fp.xreadlines():
+        if found_start:
+           if line.startswith("===="):
+               break
+           result_buf += line
+           continue
+
+        start_re=SL_START_RE.search(prev_line2 + prev_line + line, 0)
+        if not start_re:
+            prev_line2 = prev_line
+            prev_line = line
+            continue
+        found_start = True
+
+    return result_buf
+
+
+# extract the blob from a glidein log file
+def get_Compressed(log_fp, start_str):
+    raw_data=get_Compressed_raw(log_fp, start_str)
+    if raw_data:
+        gzip_data=binascii.a2b_base64(raw_data)
+        del raw_data
+        data_fd=gzip.GzipFile(fileobj=StringIO.StringIO(gzip_data))
+        data=data_fd.read()
+    else:
+        data=raw_data
+    return data
+
+
+# extract the Condor Log from a glidein log file
+# condor_log_id should be something like "StartdLog"
+def get_CondorLog(log_fp, condor_log_id):
+    start_str="^%s\n======== gzip . uuencode ============="%condor_log_id
+    return get_Compressed(log_fp, start_str)
+
+def get_Summary(log_fp):
+    start_str="=== Encoded XML description of glidein activity ==="
+    return get_Compressed(log_fp, start_str)
+
+#
+# Below is code *not* from glideinWMS project and covered by the Kestrel copyright.
+#
+
+def get_opt():
+    usage = "usage: %prog [-c CondorLog] fname"
+    parser = optparse.OptionParser(usage=usage)
+    parser.add_option("-c", "--condor-log", dest="condor", help="HTCondor log file to decompress (MasterLog/StartdLog/StarterLog/StartdHistoryLog)", default="StartdLog")
+    parser.add_option("-s", "--summary", dest="summary", help="Print activity summary", default=False, action="store_true")
+
+    opts, args = parser.parse_args()
+
+    if len(args) != 1:
+        parser.error("Incorrect number of arguments; must specify a single filename or '-' to denote stdin")
+
+    if args[0] == '-':
+       fp = sys.stdin
+    else:
+       fp = open(args[0], "r")
+
+    return opts, fp
+
+def main():
+    opts, fp = get_opt()
+
+    if opts.summary:
+        print get_Summary(fp)
+    else:
+        print get_CondorLog(fp, opts.condor),
+
+if __name__ == "__main__":
+    main()
+

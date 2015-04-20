@@ -97,6 +97,24 @@ def get_opts():
 
     return opts, args[0]
 
+# The following helper function is from the gWMS source code.
+# From https://github.com/holzman/glideinWMS/blob/master/creation/lib/cgWParamDict.py
+# LICENSE is reproduced here: https://github.com/holzman/glideinWMS/blob/master/LICENSE.txt
+def getGlideinCpusNum(glidein):
+   """
+   Given the glidein data structure, get the GLIDEIN_CPUS configured.
+   If GLIDEIN_CPUS is not configured or is set to auto, ASSUME it to be 1
+   """
+   
+   glidein_cpus = 1
+   cpus = str(glidein['attrs'].get('GLIDEIN_CPUS', 1))
+   if cpus.upper() == 'AUTO':
+       glidein_cpus = 1
+   else:
+       glidein_cpus = int(cpus)
+
+   return glidein_cpus
+
 
 def main():
     opts, jobid = get_opts()
@@ -175,12 +193,7 @@ def main():
         if 'GlideClientMatchingGlideinCondorExpr' in entry:
             try:
                 match_expr = entry["GlideClientMatchingGlideinCondorExpr"]
-                match_expr = """((job[\"JobStatus\"]==2) or (((not glidein[\"attrs\"].has_key(\"GLIDEIN_Max_Walltime\")) or (((not job.has_key(\"LastVacateTime\")) and ((not job.has_key(\"NormMaxWallTimeMins\")) or ((job[\"NormMaxWallTimeMins\"]+10)<((glidein[\"attrs\"][\"GLIDEIN_Max_Walltime\"]-glidein[\"attrs\"][\"GLIDEIN_Retire_Time_Spread\"])/60)))) or ((job.has_key(\"LastVacateTime\")) and ((not job.has_key(\"MaxWallTimeMins\")) or ((job[\"MaxWallTimeMins\"]+10)<((glidein[\"attrs\"][\"GLIDEIN_Max_Walltime\"]-glidein[\"attrs\"][\"GLIDEIN_Retire_Time_Spread\"])/60)))))) and ((not job.has_key(\"MemoryUsage\")) or (job[\"MemoryUsage\"]<=(glidein[\"attrs\"][\"GLIDEIN_MaxMemMBs\"]))) and (job[\"RequestMemory\"]<=glidein[\"attrs\"][\"GLIDEIN_MaxMemMBs\"])  and (((not job.has_key(\"NumJobStarts\")) or (job[\"NumJobStarts\"]<5)) or (job.has_key(\"LastVacateTime\") and ((job[\"ServerTime\"]-job[\"LastVacateTime\"])>3600))))) and \
-                    ((not glidein[\"attrs\"].has_key(\"GLIDEIN_Job_Min_Time\"))or(job.has_key(\"NormMaxWallTimeMins\")and((job[\"NormMaxWallTimeMins\"]*60)>glidein[\"attrs\"][\"GLIDEIN_Job_Min_Time\"]))) and \
-                    ((job.has_key(\"DESIRED_Sites\") and (glidein[\"attrs\"][\"GLIDEIN_CMSSite\"] in job[\"DESIRED_Sites\"].split(\",\"))) or (job.has_key(\"DESIRED_Gatekeepers\") and (glidein[\"attrs\"][\"GLIDEIN_Gatekeeper\"] in job[\"DESIRED_Gatekeepers\"].split(\",\"))) or (job.has_key(\"DESIRED_SEs\") and glidein[\"attrs\"].has_key(\"GLIDEIN_SEs\") and (len(set(glidein[\"attrs\"][\"GLIDEIN_SEs\"].split(\",\"))&set(job[\"DESIRED_SEs\"].split(\",\")))>0))) and \
-                    (((glidein[\"attrs\"].get(\"GLIDEIN_Is_HTPC\")==\"True\")==(job.get(\"DESIRES_HTPC\")==1))or(glidein[\"attrs\"][\"GLIDEIN_CMSSite\"]==\"T2_US_Purdue\"))"""
-                match_expr = """ ((job.has_key(\"DESIRED_Sites\") and (glidein[\"attrs\"][\"GLIDEIN_CMSSite\"] in job[\"DESIRED_Sites\"].split(\",\"))) or (job.has_key(\"DESIRED_Gatekeepers\") and (glidein[\"attrs\"][\"GLIDEIN_Gatekeeper\"] in job[\"DESIRED_Gatekeepers\"].split(\",\"))) or (job.has_key(\"DESIRED_SEs\") and glidein[\"attrs\"].has_key(\"GLIDEIN_SEs\") and (len(set(glidein[\"attrs\"][\"GLIDEIN_SEs\"].split(\",\"))&set(job[\"DESIRED_SEs\"].split(\",\")))>0))) """
-                if not eval(match_expr, {}, scope_vars):
+                if not eval(match_expr, {'getGlideinCpusNum': getGlideinCpusNum}, scope_vars):
                     excluded_match.append(entry)
                 else:
                     passes_match = True
@@ -191,7 +204,7 @@ def main():
                 #keys.sort()
                 #print keys
                 #print scope_vars['glidein']
-                raise
+                #raise
         if passes_match and passes_entry_const and passes_job_const and passes_start_expr:
             filtered_entries.append(entry)
 
@@ -211,6 +224,7 @@ def main():
         kindkey = 'GLIDEIN_CMSSite'
     else:
         print >> sys.stderr, "Unknown value for option --entries (%s).  Known values: cms, site, entry" % opts.entries
+        sys.exit(3)
 
     if filtered_entries:
         _entries = set(["%s" % entry[kindkey] for entry in filtered_entries])
@@ -233,19 +247,19 @@ def main():
             _entries = set([entry[kindkey] for entry in excluded_job_const if entry[kindkey] not in already_excluded])
             _entries = list(_entries)
             _entries.sort()
-            print "Excluded %s due to job query constraint:\n%s" % "\n".join(["- %s" % i for i in _entries])
+            print "Excluded %s due to job query constraint:\n%s" % (kind, "\n".join(["- %s" % i for i in _entries]))
             already_excluded.update(_entries)
         if excluded_match:
             _entries = set([entry[kindkey] for entry in excluded_match if entry[kindkey] not in already_excluded])
             _entries = list(_entries)
             _entries.sort()
-            print "Excluded %s due to job/entry match constraint:\n%s" % "\n".join(["- %s" % i for i in _entries])
+            print "Excluded %s due to job/entry match constraint:\n%s" % (kind, "\n".join(["- %s" % i for i in _entries]))
             already_excluded.update(_entries)
         if excluded_start_expr:
             _entries = set([entry[kindkey] for entry in excluded_start_expr if entry[kindkey] not in already_excluded])
             _entries = list(_entries)
             _entries.sort()
-            print "Excluded %s due to entry START expression:\n%s" % "\n".join(["- %s" % i for i in _entries])
+            print "Excluded %s due to entry START expression:\n%s" % (kind, "\n".join(["- %s" % i for i in _entries]))
 
 
 if __name__ == '__main__':
