@@ -110,10 +110,11 @@ def main():
     args = g_args
 
     cp = ConfigParser.ConfigParser()
+    global_config_generated = os.path.join(glidein_path, "config_generated.ini")
     global_config = os.path.join(glidein_path, "config.ini")
     local_config = os.path.join(local_siteconf, "GlideinConfig", "config.ini")
 
-    cp.read([global_config, local_config])
+    cp.read([global_config_generated, global_config, local_config])
 
     tree = xml.etree.ElementTree.parse(job_config)
     job_config_root = tree.getroot()

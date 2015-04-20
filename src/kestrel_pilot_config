@@ -1,7 +1,9 @@
 #!/usr/bin/python
 
+import os
 import sys
 import optparse
+import tempfile
 
 import classad
 import htcondor
@@ -15,11 +17,18 @@ def check_is_expr(name, value):
 
 def parse_opts():
     parser = optparse.OptionParser()
+
+    # Have the option transform be the identity transform; preserves case of option names
+    # (gWMS is case-sensitive)
+    parser.optionxform = str
+
     parser.add_option("-c", "--constraint", default='Name=?="red.unl.edu"', dest="const", help="Constraint for parsing schedds")
     parser.add_option("-j", "--job-constraint", default='GlideinClient =?= "CMSG-v1_0.main"', dest="job_const", help="Job query constraint")
     parser.add_option("-p", "--pool", default="collector1.opensciencegrid.org:9619", dest="pool", help="Collector to query for glideins")
     parser.add_option("-i", "--integrity", default=False, action="store_true", dest="integrity")
     parser.add_option("-d", "--debug", default=False, action="store_true", dest="debug")
+    parser.add_option("-w", "--write", default=False, action="store_true", dest="write")
+    parser.add_option("-o", "--output", default="/cvmfs/cms.cern.ch/glidein/config_generated.ini", dest="output")
 
     opts, args = parser.parse_args()
 
@@ -70,7 +79,6 @@ def main():
                 cur_arg = None
         #for key, val in args.items():
         #    print key, ":", val
-        print '[Options]'
         my_params = [ \
             'clientdescript', \
             'clientsign', \
@@ -94,9 +102,25 @@ def main():
             'param_GLIDEIN_Client', \
             'signentry', \
         ]
-        for key, val in args.items():
-            if key in my_params:
-                print '%s = %s' % (key, val)
+        if opts.write:
+            cfg_dir, cfg_file = os.path.split(opts.output)
+            if not os.path.exists(cfg_dir):
+                os.makedirs(cfg_dir)
+            tempfd = tempfile.NamedTemporaryFile(dir=cfg_dir, prefix=cfg_file, delete=False)
+            try:
+                for key, val in args.items():
+                    if key in my_params:
+                        tempfd.write('%s = %s\n' % (key, val))
+            except:
+                os.unlink(tempfd.name)
+                raise
+            tempfd.close()
+            os.rename(tempfd.name, opts.output)
+        else:
+            print '[Options]'
+            for key, val in args.items():
+                if key in my_params:
+                    print '%s = %s' % (key, val)
         break
 
 if __name__ == '__main__':
