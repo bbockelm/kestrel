@@ -1,0 +1,179 @@
+#!/usr/bin/python
+
+import os
+import sys
+import time
+import random
+import optparse
+import ConfigParser
+import xml.etree.ElementTree
+
+# The original defaults; ideally, everything is overridden
+# from configuration files.
+g_args = { \
+    '-v': 'std',
+    '-name': 'v1_3',
+    '-entry': 'CMS_T2_US_Nebraska_Red',
+    '-clientname': 'CMSG-v1_0.main',
+    '-schedd': 'schedd_glideins1@vocms32.cern.ch',
+    '-proxy': 'OSG',
+    '-factory': 'CMS-CERN2',
+    '-web': 'http://vocms32.cern.ch/glidefactory/stage/glidein_v1_3',
+    '-sign': '808655f0a04de85d26484662f27b5dce8b7944a4',
+    '-signentry': 'acab1da423360d437114c41dd0e934876ece0488',
+    '-signtype': 'sha1',
+    '-descript': 'description.eccgBT.cfg',
+    '-descriptentry': 'description.eb4eDo.cfg',
+    '-dir': 'AUTO',
+    '-submitcredid': 'None',
+    '-slotslayout': 'fixed',
+    '-clientweb': 'http://vocms0167.cern.ch/vofrontend/stage/frontend_CMSG-v1_0',
+    '-clientsign': '749ad3e8112f07746e47cabcf680ed66504b33bb',
+    '-clientsigntype': 'sha1',
+    '-clientdescript': 'description.eavaBK.cfg',
+    '-clientgroup': 'main',
+    '-clientwebgroup': 'http://vocms0167.cern.ch/vofrontend/stage/frontend_CMSG-v1_0/group_main',
+    '-clientsigngroup': '311c3eaf4bc14209c58d9394448b011c125f52b1',
+    '-clientdescriptgroup': 'description.e3rhMk.cfg',
+    '-cluster': 'not_from_factory',
+    '-subcluster': '0',
+}
+
+g_params = { \
+    'GLIDEIN_Client': 'CMSG-v1_0.main',
+    'CONDOR_VERSION': '8.dot,2.dot,x',
+    'GLIDEIN_Glexec_Use': 'NEVER',
+    'GLIDEIN_Job_Max_Time': '34800',
+    'GLIDECLIENT_ReqNode': 'vocms32.dot,cern.dot,ch',
+    'CONDOR_OS': 'rhel6',
+    'MIN_DISK_GBS': '1',
+    'GLIDEIN_Monitoring_Enabled': 'False',
+    'CONDOR_ARCH': 'default',
+    'UPDATE_COLLECTOR_WITH_TCP': 'False',
+    'USE_MATCH_AUTH': 'True',
+    'GLIDEIN_Report_Failed': 'NEVER',
+    'GLIDEIN_Collector': 'vocms099.dot,cern.dot,ch.colon,9620.minus,10119.semicolon,vocms097.dot,cern.dot,ch.colon,9620.minus,10119',
+}
+
+g_start = time.time()
+
+def maybe_sleep(exit_val):
+    if sys.stdout.isatty():
+        print "Not sleeping as this process is connected to a terminal."
+    else:
+        elapsed = time.time() - g_start
+        if elapsed < 0:
+            print "Sleeping for 20 minutes as a negative amount of time has elapsed (check system clock?)"
+        else:
+            remaining = 20*60 - elapsed;
+            if remaining > 0:
+                print "Sleeping for %d seconds to delay exit." % remaining
+                time.sleep(remaining)
+    sys.exit(exit_val)
+
+
+def parse_opts():
+    parser = optparse.OptionParser()
+
+    opts, args = parser.parse_args()
+
+    if args:
+        print >> sys.stderr, "No arguments should be passed to to script."
+        sys.exit(1)
+
+    return opts
+
+
+def main():
+    cvmfs_path = os.environ.get("CVMFS", "/cvmfs")
+    local_siteconf = os.path.join(cvmfs_path, "cms.cern.ch", "SITECONF", "local")
+    if not os.path.exists(local_siteconf):
+        print "CVMFS siteconf path (%s) does not exist; is CVMFS running and configured properly?" % cvmfs_path
+        return maybe_sleep(1)
+
+    job_config = os.path.join(local_siteconf, "JobConfig", "site-local-config.xml")
+    if not os.path.exists(job_config):
+        print "site-local-config.xml does not exist in CVMFS (looked at %s); is CVMFS running and configured properly?" % cvmfs_path
+
+    glidein_path = os.path.join(cvmfs_path, "cms.cern.ch", "glidein")
+
+    if 'OSG_GRID' in os.environ:
+        pass
+    elif os.path.exists("/etc/osg/wn-client/setup.sh"):
+        os.environ['OSG_GRID'] = '/etc/osg/wn-client'
+    elif os.path.exists(os.path.join(cvmfs_path, "oasis.opensciencegrid.org")):
+        os.environ['OSG_GRID'] = os.path.join(cvmfs_path, 'oasis.opensciencegrid.org/osg-software/osg-wn-client/3.2/current/el6-x86_64')
+    else:
+        os.environ['VO_CMS_SW_DIR'] = os.path.join(cvmfs_path, "cms.cern.ch")
+
+    params = g_params
+    args = g_args
+
+    cp = ConfigParser.ConfigParser()
+    global_config = os.path.join(glidein_path, "config.ini")
+    local_config = os.path.join(local_siteconf, "GlideinConfig", "config.ini")
+
+    cp.read([global_config, local_config])
+
+    tree = xml.etree.ElementTree.parse(job_config)
+    job_config_root = tree.getroot()
+
+    # TODO:
+    # - Initialize signatures from config file.
+    # - Override from CLI (number of cores, idle time).
+    # - Make sure X509_USER_PROXY is set.
+
+    if 'OSG_SQUID_LOCATION' not in os.environ:
+        if 'http_proxy' in os.environ:
+            args['-proxy'] = os.environ['http_proxy']
+        else:
+            proxies = []
+            for proxy in job_config_root[0].find("calib-data").find("frontier-connect").findall("proxy"):
+                if proxy.get("url"):
+                    proxies.append(proxy.get("url"))
+            if proxies:
+                random.shuffle(proxies)
+                print "Using proxy", proxies[0]
+                args['-proxy'] = proxies[0]
+            else:
+                print "Error!  Cannot determine the proxy from $OSG_SQUID_LOCATION, $http_proxy, or site-local-config.xml."
+                maybe_sleep(1)
+
+    site_name = None
+    if job_config_root[0].get('name'):
+        site_name = job_config_root[0].get('name')
+
+    os.environ.setdefault("X509_USER_PROXY", "/tmp/x509up_u%d" % os.geteuid())
+
+    if cp.has_section("Options"):
+        for key, val in cp.items("Options"):
+            args['-' + key] = val
+
+    if cp.has_section("Parameters"):
+        for key, val in cp.items("Parameters"):
+            params[key] = val
+
+    for key, val in params.items():
+        args["-param_%s" % key] = val
+
+    #args['-param_CMSIsLocal'] = 'true'
+    # CMS-specific; can probably be fixed by allowing CLI to override entry parameters.
+    if site_name:
+        args["-param_GLIDEIN_CMSSite_Override"] = site_name
+
+    startup_binary = os.path.join(glidein_path, '')
+    if cp.has_section("Binaries") and cp.has_option("Binaries", "startup_script"):
+        startup_binary = cp.get("Binaries", "startup_script")
+
+    real_args = ['glidein_startup.sh']
+    for key, val in args.items():
+        real_args.append(key)
+        real_args.append(val)
+
+    print "Final arguments:"
+    print real_args
+    os.execv(startup_binary, real_args)
+
+if __name__ == '__main__':
+    main()
+
