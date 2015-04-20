@@ -1,0 +1,55 @@
+#!/usr/bin/python
+
+import optparse
+
+import classad
+import htcondor
+
+def get_opt():
+    parser = optparse.OptionParser(usage="Usage: %prog collector1 collector2")
+    parser.add_option("-c", "--const", dest="const", help="Provide a constraint for slots in the collectors.")
+
+    opts, args = parser.parse_args()
+    if len(args) != 2:
+        parser.error("Must specify two collectors to query!")
+
+    return opts, args
+
+def main():
+    opts, args = get_opt()
+    collector1, collector2 = args
+    coll1 = htcondor.Collector(collector1)
+    coll2 = htcondor.Collector(collector2)
+
+    if opts.const:
+        expr = classad.ExprTree(opts.const)
+    else:
+        expr = classad.ExprTree("true")
+
+    glideins1 = coll1.query(htcondor.AdTypes.Startd, str(expr), ["Name", "State"])
+    glideins2 = coll2.query(htcondor.AdTypes.Startd, str(expr), ["Name", "State"])
+
+    glidein_names1 = set([i['Name'] for i in glideins1 if 'Name' in i])
+    glidein_names2 = set([i['Name'] for i in glideins2 if 'Name' in i])
+
+    glidein_claimed1 = set([i['Name'] for i in glideins1 if ('Name' in i) and ('State' in i) and (i['State'] == 'Claimed')])
+    glidein_claimed2 = set([i['Name'] for i in glideins2 if ('Name' in i) and ('State' in i) and (i['State'] == 'Claimed')])
+
+    glidein_unclaimed1 = set([i['Name'] for i in glideins1 if ('Name' in i) and ('State' in i) and (i['State'] == 'Unclaimed')])
+    glidein_unclaimed2 = set([i['Name'] for i in glideins2 if ('Name' in i) and ('State' in i) and (i['State'] == 'Unclaimed')])
+
+    print "Summary:"
+    print "There are %d unique glideins in %s; %d are claimed and %d are unclaimed" % (len(glidein_names1), collector1, len(glidein_claimed1), len(glidein_unclaimed1))
+    print "There are %d unique glideins in %s; %d are claimed and %d are unclaimed" % (len(glidein_names2), collector2, len(glidein_claimed2), len(glidein_unclaimed2))
+    print "There are %d total unique glideins; %d are claimed and %d are unclaimed" % \
+         (len(glidein_names1.union(glidein_names2)),
+          len(glidein_claimed1.union(glidein_claimed2)),
+          len(glidein_unclaimed1.union(glidein_unclaimed2)))
+    print "There are %d glideins in both; %d claimed and %d unclaimed" % \
+         (len(glidein_names1.intersection(glidein_names2)),
+          len(glidein_claimed1.intersection(glidein_claimed2)),
+          len(glidein_unclaimed1.intersection(glidein_unclaimed2)))
+
+if __name__ == '__main__':
+    main()
+
