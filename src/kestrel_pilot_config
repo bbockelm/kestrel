@@ -115,6 +115,7 @@ def main():
                 os.unlink(tempfd.name)
                 raise
             tempfd.close()
+            os.chmod(temp, 0644)
             os.rename(tempfd.name, opts.output)
         else:
             print '[Options]'
